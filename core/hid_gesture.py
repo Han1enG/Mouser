@@ -1477,7 +1477,24 @@ class HidGestureListener:
             msg = _parse(raw)
             if msg is None:
                 continue
-            _, r_feat, r_func, r_sw, r_params = msg
+            r_dev, r_feat, r_func, r_sw, r_params = msg
+
+            # Behind a receiver, a device that is waking answers after the
+            # probe has moved on, so a reply for the same request can come
+            # from a slot we already gave up on. Crediting it to this one
+            # connects to an empty slot. A direct device may answer 0x00
+            # for 0xFF.
+            if r_dev not in (self._dev_idx, self._dev_idx ^ 0xFF):
+                self._on_report(raw)
+                continue
+
+            # Receiver rejecting the request, typically for an empty slot.
+            # HID++ 1.0 error: sub-id 0x8F, then the rejected sub-id and
+            # address -- our feature index and function/software-id byte.
+            if (r_feat == 0x8F and len(r_params) > 1
+                    and ((r_func << 4) | r_sw) == feat
+                    and r_params[0] == (((func & 0x0F) << 4) | MY_SW)):
+                return None
 
             # HID++ error (feature-index 0xFF)
             if r_feat == 0xFF:
@@ -1510,9 +1527,8 @@ class HidGestureListener:
         `timeout_ms` controls how long to wait for the IRoot response. The
         default of 2000 ms is the safe value for active sessions; during
         the REPROG_V4 discovery probe in `_try_connect` we use a much
-        tighter timeout (≈400 ms) because a live HID++ device responds in
-        <50 ms and waiting longer just stalls us across non-matching
-        receiver slots and candidate interfaces.
+        tighter timeout, because waiting longer stalls us across
+        non-matching slots and candidate interfaces.
         """
         hi = (feature_id >> 8) & 0xFF
         lo = feature_id & 0xFF
@@ -3022,10 +3038,16 @@ class HidGestureListener:
             #  - Bolt receivers only use slots 1-6
             #  - Unknown: try all (BT first, then receiver slots)
             bt_opened = "bluetooth" in (opened_transport or "").lower()
+            # A sleeping device takes up to ~850 ms to answer its first
+            # request. Only a receiver can afford to wait that long: it
+            # rejects an empty slot within ~10 ms, while elsewhere nothing
+            # answers a wrong index and every probe costs its full timeout.
+            probe_ms = 400
             if bt_opened:
                 default_idx_order = (BT_DEV_IDX,)
             elif pid == BOLT_RECEIVER_PID:
                 default_idx_order = (1, 2, 3, 4, 5, 6)
+                probe_ms = 1500
             else:
                 default_idx_order = (BT_DEV_IDX, 1, 2, 3, 4, 5, 6)
             cached_dev_idx = None
@@ -3048,7 +3070,7 @@ class HidGestureListener:
             hidpp_name = None
             for idx in idx_order:
                 self._dev_idx = idx
-                fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=400)
+                fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=probe_ms)
                 if fi is not None:
                     reprog_found = True
                     self._feat_idx = fi
