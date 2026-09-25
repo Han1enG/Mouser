@@ -561,7 +561,9 @@ class HidRequestReplyMatchingTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertLess(time.monotonic() - start, 0.5)
-        self.assertEqual(listener._consecutive_request_timeouts, 0)
+        # Still counts towards the reconnect threshold: mid-session, a
+        # rejection means the device has gone.
+        self.assertEqual(listener._consecutive_request_timeouts, 1)
 
     def test_a_rejection_for_another_slot_does_not_end_the_request(self):
         listener = hid_gesture.HidGestureListener()
@@ -685,6 +687,66 @@ class HidBoltReceiverTests(unittest.TestCase):
 
         self.assertEqual(len(timeouts), 7)
         self.assertTrue(all(t == 400 for t in timeouts), timeouts)
+
+    def test_a_late_reply_does_not_settle_discovery_on_the_next_slot(self):
+        """End to end through `_request`: the mouse on slot 2 answers only
+        once slot 3 is being probed, and every other slot is empty."""
+        listener = hid_gesture.HidGestureListener()
+        info = {
+            "product_id": 0xC548, "usage_page": 0xFF00, "usage": 0x0002,
+            "source": "hidapi-enumerate", "product_string": "USB Receiver",
+            "path": b"/dev/hidraw-test",
+        }
+        clock = [1000.0]
+
+        class SlowMouseReceiver(_FakeHidDevice):
+            def __init__(self):
+                super().__init__()
+                self.queue = []
+                self.late_reply = None
+
+            def write(self, buf):
+                slot = buf[1]
+                if self.late_reply is not None:
+                    self.queue.append(self.late_reply)
+                    self.late_reply = None
+                if slot == 0x02:
+                    self.late_reply = HidRequestReplyMatchingTests.SLOT_2_REPLY
+                else:
+                    self.queue.append(
+                        [0x10, slot, 0x8F, buf[2], buf[3], 0x09, 0x00])
+
+            def read(self, size, timeout_ms=0):
+                if self.queue:
+                    return self.queue.pop(0)
+                clock[0] += (timeout_ms or 0) / 1000.0
+                return None
+
+        fake_time = SimpleNamespace(
+            time=lambda: clock[0], monotonic=time.monotonic, sleep=time.sleep)
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_query_device_name", return_value=None),
+            patch.object(listener, "_discover_reprog_controls", return_value=[]),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch.object(hid_gesture, "time", fake_time),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=SlowMouseReceiver),
+                create=True,
+            ),
+            patch("core.hid_gesture._load_last_device_cache", return_value=None),
+            patch("builtins.print"),
+        ):
+            connected = listener._try_connect()
+
+        self.assertFalse(connected, f"settled on devIdx 0x{listener._dev_idx:02X}")
 
     def test_candidates_sorted_direct_devices_before_receivers(self):
         """Bluetooth devices should be tried before USB receivers."""

@@ -1484,16 +1484,20 @@ class HidGestureListener:
             # from a slot we already gave up on. Crediting it to this one
             # connects to an empty slot. A direct device may answer 0x00
             # for 0xFF.
-            if r_dev not in (self._dev_idx, self._dev_idx ^ 0xFF):
+            if not (r_dev == self._dev_idx
+                    or (self._dev_idx == BT_DEV_IDX and r_dev == 0x00)):
                 self._on_report(raw)
                 continue
 
             # Receiver rejecting the request, typically for an empty slot.
             # HID++ 1.0 error: sub-id 0x8F, then the rejected sub-id and
             # address -- our feature index and function/software-id byte.
+            # Counted like a timeout: mid-session it means the device has
+            # gone, which is what the reconnect threshold watches for.
             if (r_feat == 0x8F and len(r_params) > 1
                     and ((r_func << 4) | r_sw) == feat
                     and r_params[0] == (((func & 0x0F) << 4) | MY_SW)):
+                self._consecutive_request_timeouts += 1
                 return None
 
             # HID++ error (feature-index 0xFF)
