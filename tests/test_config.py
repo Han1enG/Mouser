@@ -560,6 +560,18 @@ class DefaultActionValidityTests(unittest.TestCase):
                     f"show a raw id on {platform}",
                 )
 
+    def test_custom_shortcut_ring_label_is_readable(self):
+        # A custom shortcut can never have a RING_LABEL_MAP entry, so it always
+        # takes the fallback above — the one case the guard cannot cover. That
+        # path must render the combo, not the raw "custom:..." id.
+        from core import key_simulator
+        from ui.actions_ring_overlay import _resolve_ring_label
+
+        action_id = "custom:ctrl+shift+a"
+        label = _resolve_ring_label(action_id, action_id)
+        self.assertNotIn("custom:", label)
+        self.assertEqual(label, key_simulator.custom_action_label(action_id))
+
     def test_default_config_actions_valid_on_current_platform(self):
         from core import key_simulator
 
